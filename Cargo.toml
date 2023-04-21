@@ -1,13 +1,11 @@
 [package]
-name = "markownfmt"
+name = "markown-format"
 version = "0.1.0"
 authors = ["Wonko <wonko@hanstool.org>"]
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2021"
 
 [dependencies]
-markdown = "0.3"
-regex = "*"
-lazy_static = "*"
 anyhow = "1.0.70"
+lazy_static = "1.4.0"
+markdown = "0.3.0"
+regex = "1.8.0"

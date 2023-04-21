@@ -1,5 +1,5 @@
 Markdown Format
-===============
+==========
 
 Markdown formatter with zero configuration.
 
