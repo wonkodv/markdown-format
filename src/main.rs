@@ -9,6 +9,8 @@ use std::{env, fs, path::Path, process::ExitCode};
 struct Formatter {
     output: String,
     prefixes: Vec<&'static str>,
+    prefix_inserted: bool,
+    text_inserted: bool,
 }
 
 impl Formatter {
@@ -16,6 +18,8 @@ impl Formatter {
         Self {
             output: String::new(),
             prefixes: Vec::new(),
+            prefix_inserted: false,
+            text_inserted: false,
         }
     }
 
@@ -24,8 +28,19 @@ impl Formatter {
     }
 
     fn write(&mut self, string: &str) {
-        assert!(string.chars().all(|c| c != '\n'));
-        self.output.push_str(string);
+        if !self.prefix_inserted {
+            for p in &self.prefixes {
+                self.output.push_str(p);
+            }
+            self.prefix_inserted = true;
+        }
+
+        if !string.is_empty() {
+            assert!(string.chars().all(|c| c != '\n'));
+
+            self.output.push_str(string);
+            self.text_inserted = true;
+        }
     }
 
     fn write_all(&mut self, strings: &[&str]) {
@@ -35,10 +50,15 @@ impl Formatter {
     }
 
     fn line_feed(&mut self) {
-        for p in &self.prefixes {
-            self.output.push_str(p);
-        }
         self.output.push('\n');
+        self.prefix_inserted = false;
+        self.text_inserted = false;
+    }
+
+    fn maybe_line_feed(&mut self) {
+        if self.text_inserted {
+            self.line_feed();
+        }
     }
 
     fn write_lines(&mut self, string: &str) {
@@ -47,29 +67,38 @@ impl Formatter {
         }
     }
 
+    /// Write prefix, but clear `text_inserted` so maybe_line_feed will not linefeed.
+    fn push2(&mut self, this_prefix: &str, next_prefix: &'static str) {
+        assert!(!self.prefix_inserted);
+        assert!(!self.text_inserted);
+        self.write(this_prefix);
+        self.text_inserted = false;
+        self.push(next_prefix);
+    }
+
     fn push(&mut self, prefix: &'static str) {
         self.prefixes.push(prefix);
-        self.write(prefix);
     }
 
     fn pop(&mut self) {
         self.prefixes.pop().unwrap();
     }
 
-    fn format_spans(&mut self, spans: &[Span], can_break: bool) {
+    fn format_spans(&mut self, spans: &[Span], extra_breaks: bool) {
         for span in spans {
             match span {
                 Break => {
-                    assert!(can_break);
-                    self.line_feed()
+                    assert!(extra_breaks);
+                    self.write("\\");
+                    self.line_feed();
                 }
                 Text(text) => {
                     self.write(text);
                 }
                 Code(text) => {
-                    let b = can_break && text.len() > 20;
+                    let b = extra_breaks && text.len() > 20;
                     if b {
-                        self.line_feed();
+                        self.maybe_line_feed();
                     }
                     self.write_all(&["`", text, "`"]);
                     if b {
@@ -77,49 +106,49 @@ impl Formatter {
                     }
                 }
                 Link(text, url, None) => {
-                    if can_break {
-                        self.line_feed();
+                    if extra_breaks {
+                        self.maybe_line_feed();
                     }
                     self.write_all(&["[", text, "](", url, ")"]);
-                    if can_break {
+                    if extra_breaks {
                         self.line_feed();
                     }
                 }
                 Link(text, url, Some(title)) => {
-                    if can_break {
-                        self.line_feed();
+                    if extra_breaks {
+                        self.maybe_line_feed();
                     }
                     self.write_all(&["[", text, "](", url, " \"", title, "\")"]);
-                    if can_break {
+                    if extra_breaks {
                         self.line_feed();
                     }
                 }
                 Image(text, url, None) => {
-                    if can_break {
-                        self.line_feed();
+                    if extra_breaks {
+                        self.maybe_line_feed();
                     }
                     self.write_all(&["![", text, "](", url, ")"]);
-                    if can_break {
+                    if extra_breaks {
                         self.line_feed();
                     }
                 }
                 Image(ref text, ref url, Some(ref title)) => {
-                    if can_break {
-                        self.line_feed();
+                    if extra_breaks {
+                        self.maybe_line_feed();
                     }
                     self.write_all(&["![", text, "](", url, " \"", title, "\")"]);
-                    if can_break {
+                    if extra_breaks {
                         self.line_feed();
                     }
                 }
                 Emphasis(ref content) => {
                     self.write("*");
-                    self.format_spans(content, can_break);
+                    self.format_spans(content, extra_breaks);
                     self.write("*");
                 }
                 Strong(ref content) => {
                     self.write("__");
-                    self.format_spans(content, can_break);
+                    self.format_spans(content, extra_breaks);
                     self.write("__");
                 }
             };
@@ -127,24 +156,23 @@ impl Formatter {
     }
 
     fn format_header(&mut self, spans: &[Span], level: usize) {
-        self.line_feed();
-        self.line_feed();
         match level {
             1 | 2 => {
+                self.write(""); // ensure prefixes are written
                 let len = self.output.len();
                 self.format_spans(spans, false);
                 let len = self.output.len() - len;
                 self.line_feed();
-                let bar;
-                if level == 1 {
-                    bar = "=".repeat(len);
+                let bar = if level == 1 {
+                    "=".repeat(len)
                 } else {
-                    bar = "-".repeat(len);
-                }
+                    "-".repeat(len)
+                };
                 self.write(&bar);
             }
             level if level > 2 => {
                 self.write(&"#".repeat(level));
+                self.write(" ");
                 self.format_spans(spans, false);
             }
             _ => unreachable!(),
@@ -155,14 +183,14 @@ impl Formatter {
 
     fn format_block(&mut self, block: &Block) {
         match block {
-            Block::Header(spans, level) => self.format_header(&spans, *level),
+            Block::Header(spans, level) => self.format_header(spans, *level),
             Block::Paragraph(spans) => {
-                self.format_spans(&spans, true);
-                self.line_feed();
+                self.format_spans(spans, true);
+                self.maybe_line_feed();
             }
             Block::Blockquote(blocks) => {
                 self.push("> ");
-                self.format_blocks(&blocks);
+                self.format_blocks(blocks);
                 self.pop();
             }
             Block::CodeBlock(None, code) => {
@@ -187,30 +215,29 @@ impl Formatter {
                     1
                 };
                 for (index, item) in items.iter().enumerate() {
-                    self.write(&format!("{:<4}", format!("{counter}.")));
+                    self.push2(&format!("{:<4}", format!("{counter}.")), "    ");
+
                     match item {
                         ListItem::Simple(spans) => self.format_spans(spans, false),
                         ListItem::Paragraph(blocks) => {
-                            self.prefixes.push("    ");
                             self.format_blocks(blocks);
-                            self.pop();
                         }
                     }
+                    self.pop();
                     self.line_feed();
                     counter += 1;
                 }
             }
             Block::UnorderedList(items) => {
                 for item in items {
-                    self.write("-   ");
+                    self.push2("*   ", "    ");
                     match item {
                         ListItem::Simple(spans) => self.format_spans(spans, false),
                         ListItem::Paragraph(blocks) => {
-                            self.prefixes.push("    ");
                             self.format_blocks(blocks);
-                            self.pop();
                         }
                     }
+                    self.pop();
                     self.line_feed();
                 }
             }
@@ -233,12 +260,13 @@ impl Formatter {
         }
     }
 }
-fn format(input: &str) -> Result<String> {
-    let md = markdown::tokenize(&input);
-    eprintln!("{md:?}");
+
+fn format(input: &str) -> String {
+    let md = markdown::tokenize(input);
+    eprintln!("{md:#?}");
     let mut formatter = Formatter::new();
     formatter.format_blocks(&md);
-    Ok(formatter.into_output())
+    formatter.into_output()
 }
 
 fn process_file(path: &Path) -> Result<()> {
@@ -246,7 +274,7 @@ fn process_file(path: &Path) -> Result<()> {
 
     let s = fs::read_to_string(path)?;
 
-    let s = format(&s)?;
+    let s = format(&s);
 
     let mut pb = path.to_path_buf();
     pb.set_extension("formatted-md");
@@ -260,10 +288,8 @@ fn walk(path: &Path) -> bool {
     if path.is_dir() {
         let rd = path.read_dir();
         if let Ok(rd) = rd {
-            for c in rd {
-                if let Ok(c) = c {
-                    walk(&c.path());
-                }
+            for c in rd.flatten() {
+                walk(&c.path());
             }
         }
     } else if path.is_file() {
@@ -288,5 +314,59 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn mdtest(input: &str, output: &str) {
+        let input = input.replace("\n            ", "\n");
+        let output = output.replace("\n            ", "\n");
+
+        let formatted = format(&input);
+
+        eprintln!("@@@@@ expected text\n{output}");
+        eprintln!("@@@@@ actual text\n{formatted}");
+
+        if formatted != output {
+            for (i, (actual, expected)) in formatted.split("\n").zip(output.split("\n")).enumerate()
+            {
+                if actual != expected {
+                    panic!("Formatted not as expected in line {i}\nexpected: {expected}\nactual:   {actual}\n");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn headlines_underlines() {
+        mdtest(
+            "
+            # H1
+
+            text
+
+            ## H2
+
+            text
+
+            ###     H3
+            ",
+            "H1
+            ==
+
+            text
+
+            H2
+            --
+
+            text
+
+            ### H3
+
+            ",
+        );
     }
 }
